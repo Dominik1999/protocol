@@ -3,6 +3,8 @@
 ## v0.15.0 (TBD)
 
 ### Features
+
+- Added lock/unlock path for Miden-native tokens in the AggLayer bridge: `is_native` flag in `faucet_registry_map`, bridge-local `faucet_metadata_map` (replacing FPI to faucets for conversion data), and `lock_asset` / `unlock_and_send` procedures so the bridge holds native assets in its own vault instead of burn/mint via a faucet ([#2771](https://github.com/0xMiden/protocol/pull/2771)).
 ### Changes
 - Added validation of leaf type on CLAIM note processing to prevent message leaves from being processed as asset claims ([#2730](https://github.com/0xMiden/protocol/pull/2730)).
 
@@ -30,6 +32,7 @@
 
 - Made deserialization of `AccountCode` more robust ([#2788](https://github.com/0xMiden/protocol/pull/2788)).
 - Fixed `output_note::add_asset` and `output_note::set_attachment` to no longer accept invalid note indices ([#2824](https://github.com/0xMiden/protocol/pull/2824)).
+- [BREAKING] Keyed AggLayer faucet token registry by `(origin_token_address, origin_network)` instead of `origin_token_address` alone, preventing same-address cross-network mint collisions on CLAIM ([#2860](https://github.com/0xMiden/protocol/pull/2860)).
 
 ## 0.14.3 (2026-04-07)
 

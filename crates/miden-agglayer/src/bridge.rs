@@ -83,6 +83,10 @@ static TOKEN_REGISTRY_MAP_SLOT_NAME: LazyLock<StorageSlotName> = LazyLock::new(|
     StorageSlotName::new("agglayer::bridge::token_registry_map")
         .expect("token registry map storage slot name should be valid")
 });
+static FAUCET_METADATA_MAP_SLOT_NAME: LazyLock<StorageSlotName> = LazyLock::new(|| {
+    StorageSlotName::new("agglayer::bridge::faucet_metadata_map")
+        .expect("faucet metadata map storage slot name should be valid")
+});
 
 // bridge in
 // ------------------------------------------------------------------------------------------------
@@ -145,6 +149,9 @@ static LET_NUM_LEAVES_SLOT_NAME: LazyLock<StorageSlotName> = LazyLock::new(|| {
 ///   keccak256 hash chain.
 /// - [`Self::faucet_registry_map_slot_name`]: Stores the faucet registry map.
 /// - [`Self::token_registry_map_slot_name`]: Stores the token address → faucet ID map.
+/// - [`Self::faucet_metadata_map_slot_name`]: Stores conversion metadata (origin address, origin
+///   network, scale, metadata hash) for all registered faucets, keyed by sub-key scheme based on
+///   faucet ID.
 /// - [`Self::claim_nullifiers_slot_name`]: Stores the CLAIM note nullifiers map (RPO(leaf_index,
 ///   source_bridge_network) → \[1, 0, 0, 0\]).
 /// - [`Self::cgi_chain_hash_lo_slot_name`]: Stores the lower 128 bits of the CGI chain hash.
@@ -156,6 +163,10 @@ static LET_NUM_LEAVES_SLOT_NAME: LazyLock<StorageSlotName> = LazyLock::new(|| {
 ///
 /// The bridge starts with an empty faucet registry; faucets are registered at runtime via
 /// CONFIG_AGG_BRIDGE notes.
+///
+/// Claim validation compares the leaf's `destination_network` to the global MASM constant
+/// `agglayer::common::constants::MIDEN_NETWORK_ID`. Rust exposes the same value as
+/// [`Self::MIDEN_NETWORK_ID`] from generated `agglayer_constants.rs` file.
 #[derive(Debug, Clone)]
 pub struct AggLayerBridge {
     bridge_admin_id: AccountId,
@@ -166,6 +177,11 @@ pub struct AggLayerBridge {
 impl AggLayerBridge {
     // CONSTANTS
     // --------------------------------------------------------------------------------------------
+
+    /// AggLayer-assigned network ID for this Miden chain.
+    ///
+    /// Matches `const MIDEN_NETWORK_ID` in `asm/agglayer/common/constants.masm`.
+    pub const MIDEN_NETWORK_ID: u32 = MIDEN_NETWORK_ID;
 
     const REGISTERED_GER_MAP_VALUE: Word = Word::new([ONE, ZERO, ZERO, ZERO]);
 
@@ -228,6 +244,14 @@ impl AggLayerBridge {
     /// Storage slot name for the token registry map.
     pub fn token_registry_map_slot_name() -> &'static StorageSlotName {
         &TOKEN_REGISTRY_MAP_SLOT_NAME
+    }
+
+    /// Storage slot name for the faucet metadata map.
+    ///
+    /// This map stores conversion metadata (origin address, origin network, scale, metadata hash)
+    /// for all registered faucets, keyed by sub-key scheme based on faucet ID.
+    pub fn faucet_metadata_map_slot_name() -> &'static StorageSlotName {
+        &FAUCET_METADATA_MAP_SLOT_NAME
     }
 
     // --- bridge in --------
@@ -493,6 +517,7 @@ impl AggLayerBridge {
             &*LET_NUM_LEAVES_SLOT_NAME,
             &*FAUCET_REGISTRY_MAP_SLOT_NAME,
             &*TOKEN_REGISTRY_MAP_SLOT_NAME,
+            &*FAUCET_METADATA_MAP_SLOT_NAME,
             &*BRIDGE_ADMIN_ID_SLOT_NAME,
             &*GER_MANAGER_ID_SLOT_NAME,
             &*GER_REMOVER_ID_SLOT_NAME,
@@ -519,6 +544,7 @@ impl From<AggLayerBridge> for AccountComponent {
             StorageSlot::with_value(LET_NUM_LEAVES_SLOT_NAME.clone(), Word::empty()),
             StorageSlot::with_empty_map(FAUCET_REGISTRY_MAP_SLOT_NAME.clone()),
             StorageSlot::with_empty_map(TOKEN_REGISTRY_MAP_SLOT_NAME.clone()),
+            StorageSlot::with_empty_map(FAUCET_METADATA_MAP_SLOT_NAME.clone()),
             StorageSlot::with_value(BRIDGE_ADMIN_ID_SLOT_NAME.clone(), bridge_admin_word),
             StorageSlot::with_value(GER_MANAGER_ID_SLOT_NAME.clone(), ger_manager_word),
             StorageSlot::with_value(GER_REMOVER_ID_SLOT_NAME.clone(), ger_remover_word),
