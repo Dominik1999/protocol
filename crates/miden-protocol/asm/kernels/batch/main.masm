@@ -1,18 +1,34 @@
+use miden::batch_kernel::memory
+use miden::batch_kernel::note_tracker
+use miden::batch_kernel::prologue
+
 # MAIN
 # =================================================================================================
 
-#! Batch kernel program (skeleton).
+#! Batch kernel program.
 #!
 #! A transaction batch groups a set of independently-proven transactions so they can later be
-#! aggregated into a block by the block kernel. This program defines the public input/output
-#! contract that the batch kernel will eventually verify, but does not yet perform any
-#! verification: it drops its inputs and exits, leaving the all-zero word output region as the
-#! stack's initial padding zeros.
+#! aggregated into a block by the block kernel. This program:
 #!
-#! Splitting the kernel into "shape only" and "verification" lets downstream Rust tooling
-#! (`BatchKernel`'s input/advice/output builders, `LocalBatchProver::prove`, the `ProvenBatch`
-#! proof field) be built and reviewed against a stable interface before the verification logic
-#! lands. The verification chain that fills in the real outputs is added in a follow-up PR.
+#! 1. Reconstructs the per-transaction data (account state transitions, input/output notes, fee,
+#!    expiration) from the advice provider, anchoring the entire reconstruction in the public
+#!    `TRANSACTIONS_COMMITMENT`.
+#! 2. Aggregates the per-transaction data into batch-wide commitments — one over the consumed
+#!    input notes, one over the produced output notes, plus the batch's effective expiration
+#!    block number — that the block kernel will later consume.
+#!
+#! Reconstruction is a recursive unhashing chain. Each layer of advice data is keyed by a hash
+#! that the previous layer's verification produced, so once `TRANSACTIONS_COMMITMENT` is anchored
+#! to the public input, every byte that feeds the batch outputs is transitively committed-to:
+#!
+#!   `TRANSACTIONS_COMMITMENT` (public input) -> `(tx_id, account_id)` tuple list
+#!   each `tx_id`                              -> per-tx
+#!     `(INIT, FINAL, INPUT_NOTES_COMMITMENT_i, OUTPUT_NOTES_COMMITMENT_i, FEE_ASSET)`
+#!   each `INPUT_NOTES_COMMITMENT_i`           -> `(NULLIFIER, EMPTY_OR_COMMITMENT)` tuples
+#!   each `OUTPUT_NOTES_COMMITMENT_i`          -> `(NOTE_ID, METADATA_COMMITMENT)` tuples
+#!
+#! Each layer is loaded via `adv.push_mapvaln` keyed by the previously-verified hash and asserted
+#! against that hash via `assert_eqw`. Only verified data feeds into the batch outputs.
 #!
 #! Inputs: [
 #!   TRANSACTIONS_COMMITMENT,
@@ -28,24 +44,54 @@
 #! ]
 #!
 #! Where:
-#! - TRANSACTIONS_COMMITMENT is the sequential hash of the `(tx_id, account_id)` tuples
-#!   committing to the transactions in the batch (i.e. the `BatchId` value).
+#! - TRANSACTIONS_COMMITMENT is the sequential hash of the `(tx_id, account_id)` tuples committing
+#!   to the transactions in the batch (i.e. the `BatchId` value).
 #! - BLOCK_HASH is the commitment of the batch's reference block.
-#! - INPUT_NOTES_COMMITMENT will be the sequential hash over every transaction's input note
-#!   commitments. In this skeleton it is the empty word.
-#! - OUTPUT_NOTES_COMMITMENT will be the sequential hash over every transaction's output note
-#!   commitments. In this skeleton it is the empty word.
-#! - batch_expiration_block_num will be the minimum of every transaction's
-#!   `expiration_block_num`. In this skeleton it is zero.
+#! - INPUT_NOTES_COMMITMENT is the sequential hash over every transaction's verified
+#!   `(NULLIFIER, EMPTY_OR_COMMITMENT)` tuples in transaction order.
+#! - OUTPUT_NOTES_COMMITMENT is the sequential hash over every transaction's verified
+#!   `(NOTE_ID, METADATA_COMMITMENT)` tuples in transaction order.
+#! - batch_expiration_block_num is the minimum of every transaction's `expiration_block_num`.
 #!
-#! TODO: replace this skeleton with the verification chain that reconstructs every transaction
-#!       from the advice provider, anchors the reconstruction in `TRANSACTIONS_COMMITMENT`, and
-#!       emits the real batch commitments and expiration.
+#! TODO: verify BLOCK_HASH against block header data via the same pipe-and-verify pattern.
+#! TODO: authenticate unauthenticated input notes against BLOCK_HASH's chain MMR.
+#! TODO: verify each transaction's reference block is contained in the chain MMR rooted at
+#!       BLOCK_HASH.
+#! TODO: aggregate per-account updates and emit a separate ACCOUNT_UPDATES_COMMITMENT output.
+#! TODO: erase intra-batch unauthenticated notes from INPUT_NOTES_COMMITMENT and the output set.
+#! TODO: recursively verify each transaction's `ExecutionProof`.
+#! TODO: switch OUTPUT_NOTES_COMMITMENT to the `BatchNoteTree` SMT root.
+#! TODO: assert `batch_expiration_block_num > reference_block_num`.
+#! TODO: enforce `MAX_INPUT_NOTES_PER_BATCH`, `MAX_OUTPUT_NOTES_PER_BATCH`,
+#!       `MAX_ACCOUNTS_PER_BATCH`.
+#! TODO: derive `batch_expiration_block_num` from data committed-to in the verified chain rather
+#!       than from the unverified advice stack.
 proc main
-    # Drop TRANSACTIONS_COMMITMENT and BLOCK_HASH. The VM keeps the stack at depth >= 16, so the
-    # remaining 8 felts (the explicit `pad(8)` inputs) plus 8 zeros auto-filled below them form
-    # the all-zero 16-felt output region.
-    dropw dropw
+    # TODO: verify BLOCK_HASH against block header data via the pipe-and-verify pattern.
+    swapw dropw
+    # Stack: [TRANSACTIONS_COMMITMENT]
+
+    exec.prologue::prepare_batch
+    # Stack: []
+
+    exec.note_tracker::compute_input_notes_commitment
+    # Stack: [INPUT_NOTES_COMMITMENT]
+
+    exec.note_tracker::compute_output_notes_commitment
+    # Stack: [OUTPUT_NOTES_COMMITMENT, INPUT_NOTES_COMMITMENT]
+
+    exec.memory::get_batch_expiration_block_num
+    # Stack: [batch_expiration_block_num, OUTPUT_NOTES_COMMITMENT, INPUT_NOTES_COMMITMENT]
+
+    # Push the expiration felt past both commitment words so the words land word-aligned.
+    movdn.8
+    swapw
+    # Stack: [INPUT_NOTES_COMMITMENT, OUTPUT_NOTES_COMMITMENT, batch_expiration_block_num]
+
+    # Drop the leftover words below the output region. The kernel's earlier `consume`-only
+    # operations don't reduce stack depth below the 16-felt floor, so by this point the depth
+    # has grown above 16 and we need to bring it back down.
+    repeat.3 movupw.3 dropw end
 end
 
 begin

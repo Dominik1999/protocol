@@ -38,6 +38,7 @@
 - [BREAKING] Changed note metadata version 1 to encode as `1`, leaving encoded version `0` invalid.
 - Documented the `miden::protocol::account_id` module in the protocol library docs ([#2607](https://github.com/0xMiden/protocol/issues/2607)).
 - Added a skeleton batch kernel program with the public input/output contract from issue [#1122](https://github.com/0xMiden/protocol/issues/1122), wired through `LocalBatchProver::prove` and attached to `ProvenBatch` as an `ExecutionProof`. The kernel does not yet perform any verification; the verification chain that fills in the real outputs will land in a follow-up PR.
+- Added the batch kernel's verification chain: each transaction is reconstructed from the advice provider, anchored in `TRANSACTIONS_COMMITMENT`, and the per-tx note commitments are absorbed into the batch's `INPUT_NOTES_COMMITMENT` / `OUTPUT_NOTES_COMMITMENT` outputs. `LocalBatchProver::prove` now also cross-checks the kernel's `batch_expiration_block_num` against the proposed batch.
 
 ### Fixes
 

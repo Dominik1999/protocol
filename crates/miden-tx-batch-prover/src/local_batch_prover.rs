@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::ToString;
 
 use miden_processor::DefaultHost;
@@ -39,16 +40,22 @@ impl LocalBatchProver {
     ///
     /// Verifies each transaction's `ExecutionProof` natively first, then runs the batch kernel
     /// via `miden_prover::prove` and attaches the resulting proof to the returned
-    /// [`ProvenBatch`]. The kernel's public outputs are not yet cross-checked against the
-    /// proposed batch's expected values; that check is added together with the kernel's
-    /// verification logic in a follow-up PR.
+    /// [`ProvenBatch`].
+    ///
+    /// After proof generation, the kernel's parsed `batch_expiration_block_num` output is
+    /// checked against `proposed_batch.batch_expiration_block_num()`. The two batch note
+    /// commitments produced by the kernel are *not* checked here because the kernel computes a
+    /// raw sequential hash that does not match `proposed_batch.input_notes().commitment()` for
+    /// batches with intra-batch unauthenticated-note erasure.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - any transaction's proof in the batch fails to verify;
     /// - the batch kernel program fails to execute or produce a proof;
-    /// - the kernel output stack fails to parse.
+    /// - the kernel output stack fails to parse;
+    /// - the kernel's `batch_expiration_block_num` does not match
+    ///   `proposed_batch.batch_expiration_block_num()`.
     pub async fn prove(
         &self,
         proposed_batch: ProposedBatch,
@@ -64,6 +71,7 @@ impl LocalBatchProver {
             })?;
         }
 
+        let expected_expiration = proposed_batch.batch_expiration_block_num();
         let (stack_inputs, advice_inputs) = BatchKernel::prepare_inputs(&proposed_batch);
         let mut host = DefaultHost::default();
 
@@ -77,11 +85,15 @@ impl LocalBatchProver {
         .await
         .map_err(|err| ProvenBatchError::BatchKernelExecutionFailed(err.to_string()))?;
 
-        // Validate the output stack shape (padding cells are zero and the expiration fits in
-        // u32); the actual output values themselves are not checked until the kernel verifies
-        // them.
-        BatchKernel::parse_output_stack(&stack_outputs)
-            .map_err(|err| ProvenBatchError::BatchKernelExecutionFailed(err.to_string()))?;
+        let (_input_notes_commitment, _output_notes_commitment, kernel_expiration) =
+            BatchKernel::parse_output_stack(&stack_outputs)
+                .map_err(|err| ProvenBatchError::BatchKernelExecutionFailed(err.to_string()))?;
+
+        if kernel_expiration != expected_expiration {
+            return Err(ProvenBatchError::BatchKernelExecutionFailed(format!(
+                "kernel batch_expiration_block_num {kernel_expiration} does not match the proposed batch's {expected_expiration}",
+            )));
+        }
 
         Self::build_proven_batch(proposed_batch, proof)
     }

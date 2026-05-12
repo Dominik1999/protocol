@@ -2,9 +2,10 @@ use alloc::vec::Vec;
 
 use miden_core::program::Kernel;
 
-use crate::batch::ProposedBatch;
+use crate::batch::{BatchId, ProposedBatch};
 use crate::block::BlockNumber;
 use crate::errors::BatchOutputError;
+use crate::transaction::{ToInputNoteCommitments, TransactionId};
 use crate::utils::serde::Deserializable;
 use crate::utils::sync::LazyLock;
 use crate::vm::{AdviceInputs, Program, ProgramInfo, StackInputs, StackOutputs};
@@ -18,7 +19,7 @@ static KERNEL_MAIN: LazyLock<Program> = LazyLock::new(|| {
     Program::read_from_bytes(bytes).expect("failed to deserialize batch kernel runtime")
 });
 
-// Output stack indices, kept in sync with the layout at the end of `main.masm::main`. These are
+// Output stack indices, kept in sync with the lay-out at the end of `main.masm::main`. These are
 // felt offsets, not word indices: `get_word(N)` returns the four felts at positions `N..N+4`.
 const INPUT_NOTES_COMMITMENT_WORD_IDX: usize = 0;
 const OUTPUT_NOTES_COMMITMENT_WORD_IDX: usize = 4;
@@ -34,10 +35,10 @@ const TRAILING_PAD_WORD_FELT_IDX: usize = 12;
 
 /// The batch kernel program: an executable Miden program that proves a batch of transactions.
 ///
-/// The kernel takes `[TRANSACTIONS_COMMITMENT, BLOCK_HASH]` as public inputs and emits
+/// The kernel takes `[BLOCK_HASH, TRANSACTIONS_COMMITMENT]` as public inputs and emits
 /// `[INPUT_NOTES_COMMITMENT, OUTPUT_NOTES_COMMITMENT, batch_expiration_block_num]`. See
-/// `asm/kernels/batch/main.masm` for the input/output contract and the `TODO` listing checks
-/// the kernel does not yet enforce.
+/// `asm/kernels/batch/main.masm` for the verification chain and the `TODO` markers listing
+/// checks that the kernel does not yet enforce.
 pub struct BatchKernel;
 
 impl BatchKernel {
@@ -80,9 +81,9 @@ impl BatchKernel {
     /// ```
     ///
     /// Where:
-    /// - `TRANSACTIONS_COMMITMENT` is the value [`BatchId`](crate::batch::BatchId) computes — a
-    ///   sequential hash of `(transaction_id || account_id_prefix || account_id_suffix || 0 || 0)`
-    ///   over all transactions in the batch.
+    /// - `TRANSACTIONS_COMMITMENT` is the value [`BatchId`] computes — a sequential hash of
+    ///   `(transaction_id || account_id_prefix || account_id_suffix || 0 || 0)` over all
+    ///   transactions in the batch.
     /// - `BLOCK_HASH` is the commitment of the batch's reference block.
     pub fn build_input_stack(block_hash: Word, transactions_commitment: Word) -> StackInputs {
         let mut inputs: Vec<Felt> = Vec::with_capacity(8);
@@ -167,11 +168,59 @@ impl BatchKernel {
 
     /// Builds the advice inputs (map + stack) consumed by the batch kernel.
     ///
-    /// The skeleton kernel ignores its advice inputs, so this returns the default empty value.
-    /// The follow-up PR that adds the verification chain will populate the advice map with the
-    /// `(tx_id, account_id)` tuple list keyed by `TRANSACTIONS_COMMITMENT` and the per-tx headers
-    /// and note tuples.
-    fn build_advice_inputs(_proposed_batch: &ProposedBatch) -> AdviceInputs {
-        AdviceInputs::default()
+    /// See `asm/kernels/batch/main.masm` for the layered map structure.
+    fn build_advice_inputs(proposed_batch: &ProposedBatch) -> AdviceInputs {
+        let mut advice_inputs = AdviceInputs::default();
+
+        // Layer 1: TRANSACTIONS_COMMITMENT |-> [(tx_id, account_id_pair) tuples].
+        let layer1_data = BatchId::hash_input_elements(
+            proposed_batch.transactions().iter().map(|tx| (tx.id(), tx.account_id())),
+        );
+        advice_inputs.map.extend([(proposed_batch.id().as_word(), layer1_data)]);
+
+        for tx in proposed_batch.transactions().iter() {
+            // Layer 2: tx_id |-> [INIT, FINAL, INPUT_NOTES_COMMITMENT, OUTPUT_NOTES_COMMITMENT,
+            //                     FEE_ASSET].
+            let header_data = TransactionId::input_elements(
+                tx.account_update().initial_state_commitment(),
+                tx.account_update().final_state_commitment(),
+                tx.input_notes().commitment(),
+                tx.output_notes().commitment(),
+                tx.fee(),
+            );
+            advice_inputs.map.extend([(tx.id().as_word(), header_data.to_vec())]);
+
+            // Layer 3: per-tx INPUT_NOTES_COMMITMENT |-> [(NULLIFIER, EMPTY_OR_COMMITMENT) tuples].
+            let input_notes_commitment = tx.input_notes().commitment();
+            if input_notes_commitment != Word::empty() {
+                let mut data: Vec<Felt> =
+                    Vec::with_capacity(usize::from(tx.input_notes().num_notes()) * 8);
+                for note_commit in tx.input_notes().iter() {
+                    data.extend_from_slice(note_commit.nullifier().as_word().as_elements());
+                    let commit_or_zero = note_commit.note_commitment().unwrap_or(Word::empty());
+                    data.extend_from_slice(commit_or_zero.as_elements());
+                }
+                advice_inputs.map.extend([(input_notes_commitment, data)]);
+            }
+
+            // Layer 3': per-tx OUTPUT_NOTES_COMMITMENT |-> [(NOTE_ID, METADATA_COMMITMENT) tuples].
+            let output_notes_commitment = tx.output_notes().commitment();
+            if output_notes_commitment != Word::empty() {
+                let mut data: Vec<Felt> = Vec::with_capacity(tx.output_notes().num_notes() * 8);
+                for note in tx.output_notes().iter() {
+                    data.extend_from_slice(note.id().as_word().as_elements());
+                    data.extend_from_slice(note.metadata().to_commitment().as_elements());
+                }
+                advice_inputs.map.extend([(output_notes_commitment, data)]);
+            }
+        }
+
+        // Advice stack: per-tx expiration_block_num in transaction order.
+        // The advice stack is FIFO from the prover's perspective — first pushed = first popped.
+        for tx in proposed_batch.transactions().iter() {
+            advice_inputs.stack.push(Felt::from(tx.expiration_block_num()));
+        }
+
+        advice_inputs
     }
 }

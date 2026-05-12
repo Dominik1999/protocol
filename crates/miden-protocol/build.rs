@@ -23,6 +23,7 @@ const ASM_TX_KERNEL_DIR: &str = "kernels/transaction";
 const ASM_BATCH_KERNEL_DIR: &str = "kernels/batch";
 
 const PROTOCOL_LIB_NAMESPACE: &str = "miden::protocol";
+const BATCH_KERNEL_NAMESPACE: &str = "miden::batch_kernel";
 
 const KERNEL_PROCEDURES_RS_FILE: &str = "procedures.rs";
 const TX_KERNEL_ERRORS_RS_FILE: &str = "tx_kernel_errors.rs";
@@ -105,12 +106,16 @@ fn main() -> Result<()> {
 ///
 /// Unlike the transaction kernel, the batch kernel does not expose syscalls, so there is no
 /// `KernelLibrary` to build — only a single executable program assembled from
-/// `kernels/batch/main.masm`.
+/// `kernels/batch/main.masm` with the modules under `kernels/batch/lib/` statically linked
+/// under the `miden::batch_kernel` namespace.
 fn compile_batch_kernel(source_dir: &Path, target_dir: &Path) -> Result<()> {
     let batch_kernel_dir = source_dir.join(ASM_BATCH_KERNEL_DIR);
+    let lib_dir = batch_kernel_dir.join("lib");
     let main_file_path = batch_kernel_dir.join("main.masm");
 
-    let assembler = build_assembler(None)?;
+    let mut assembler = build_assembler(None)?;
+    assembler.compile_and_statically_link_from_dir(&lib_dir, BATCH_KERNEL_NAMESPACE)?;
+
     let batch_main = assembler.assemble_program(main_file_path)?;
 
     let masb_file_path = target_dir.join("batch_kernel.masb");
